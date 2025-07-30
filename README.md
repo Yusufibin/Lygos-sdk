@@ -1,4 +1,4 @@
-# Lygos Python SDK
+# Lygos Python SDK.
 
 A Python SDK for interacting with the Lygos API.
 
