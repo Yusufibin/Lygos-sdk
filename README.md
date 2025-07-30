@@ -57,9 +57,41 @@ except Exception as e:
     print(f"An unexpected error occurred: {e}")
 ```
 
-### Get Payin Status
+### Verifying Payments (Recommended)
 
-You can retrieve the status of a payin transaction using the `get_payin_status` method.
+After the user is redirected back to your application from the Lygos payment page, you **must** verify the status of the transaction to confirm if the payment was successful. A user landing on your `success_url` is not a guarantee of a successful payment.
+
+The `validate_payment` method simplifies this process. It checks the status and raises an exception if the payment was not successful, making your success handler clean and secure.
+
+```python
+# In your success handler (e.g., a Flask route)
+from lygos_sdk.exceptions import LygosPaymentValidationError, LygosNotFoundError
+
+order_id = "unique_order_id_xyz_123" # The order_id from your success_url
+
+try:
+    payment_details = client.validate_payment(order_id=order_id)
+    print(f"Payment for order {payment_details['order_id']} was successful!")
+    # Safely activate the user's subscription, ship the product, etc.
+
+except LygosPaymentValidationError as e:
+    # This exception is raised if the status is 'pending', 'failed', etc.
+    print(f"Payment not complete: {e}")
+    # Advise the user that the payment is not yet confirmed.
+    # You can inspect e.response_body for more details.
+
+except LygosNotFoundError:
+    print("The requested order was not found. Invalid order_id.")
+    # Handle invalid order
+
+except LygosAPIError as e:
+    print(f"An API error occurred: {e}")
+    # Handle other generic API errors
+```
+
+### Retrieving Transaction Status
+
+If you need to check the status of a transaction without raising an exception for non-paid statuses, you can use the `get_payin_status` method.
 
 ```python
 try:

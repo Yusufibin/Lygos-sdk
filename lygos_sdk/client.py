@@ -8,6 +8,7 @@ from .exceptions import (
     LygosNetworkError,
     LygosNotFoundError,
     LygosServerError,
+    LygosPaymentValidationError,
 )
 
 class LygosClient:
@@ -122,3 +123,31 @@ class LygosClient:
             raise LygosNetworkError(f"Network error while getting payin status: {e}") from e
 
         return response.json()
+
+    def validate_payment(self, order_id: str) -> Dict:
+        """
+        Validates a payment by checking its status.
+
+        This is a high-level method that simplifies payment verification.
+        It fetches the transaction status and raises an exception if the
+        payment is not complete.
+
+        :param order_id: The order ID of the transaction to validate.
+        :return: A dictionary containing the transaction details if successful.
+        :raises LygosPaymentValidationError: If the payment status is not 'paid'.
+        :raises LygosNotFoundError: If the order ID is not found.
+        :raises LygosAPIError: For other API-related errors.
+        :raises LygosNetworkError: For network issues.
+        """
+        status_data = self.get_payin_status(order_id)
+
+        status = status_data.get("status")
+        if status == "paid":
+            return status_data
+
+        message = f"Payment validation failed. Status is '{status}'."
+        raise LygosPaymentValidationError(
+            message,
+            status_code=200,  # The API call itself was successful
+            response_body=status_data
+        )

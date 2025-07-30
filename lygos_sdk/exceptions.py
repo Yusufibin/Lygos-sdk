@@ -33,3 +33,8 @@ class LygosServerError(LygosAPIError):
 class LygosNetworkError(LygosError):
     """Raised for network-related errors (e.g., connection issues)."""
     pass
+
+
+class LygosPaymentValidationError(LygosAPIError):
+    """Raised when a payment validation fails (e.g., status is not 'paid')."""
+    pass
