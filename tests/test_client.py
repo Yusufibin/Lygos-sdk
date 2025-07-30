@@ -10,6 +10,7 @@ from lygos_sdk.exceptions import (
     LygosNetworkError,
     LygosNotFoundError,
     LygosServerError,
+    LygosPaymentValidationError,
 )
 
 @pytest.fixture
@@ -121,3 +122,43 @@ def test_get_payin_status_not_found(mock_get, client):
 
     with pytest.raises(LygosNotFoundError):
         client.get_payin_status("unknown_order")
+
+
+@patch('lygos_sdk.client.LygosClient.get_payin_status')
+def test_validate_payment_success(mock_get_status, client):
+    """Tests that validate_payment returns data when status is 'paid'."""
+    mock_get_status.return_value = {"status": "paid", "order_id": "order_123"}
+
+    result = client.validate_payment("order_123")
+
+    assert result == {"status": "paid", "order_id": "order_123"}
+    mock_get_status.assert_called_once_with("order_123")
+
+
+@patch('lygos_sdk.client.LygosClient.get_payin_status')
+def test_validate_payment_failed_status(mock_get_status, client):
+    """Tests that validate_payment raises an exception for 'failed' status."""
+    mock_get_status.return_value = {"status": "failed", "order_id": "order_123"}
+
+    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'failed'."):
+        client.validate_payment("order_123")
+
+    mock_get_status.assert_called_once_with("order_123")
+
+
+@patch('lygos_sdk.client.LygosClient.get_payin_status')
+def test_validate_payment_pending_status(mock_get_status, client):
+    """Tests that validate_payment raises an exception for 'pending' status."""
+    mock_get_status.return_value = {"status": "pending", "order_id": "order_123"}
+
+    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'pending'."):
+        client.validate_payment("order_123")
+
+
+@patch('lygos_sdk.client.LygosClient.get_payin_status')
+def test_validate_payment_missing_status(mock_get_status, client):
+    """Tests that validate_payment raises an exception if 'status' key is missing."""
+    mock_get_status.return_value = {"order_id": "order_123"}  # No status key
+
+    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'None'."):
+        client.validate_payment("order_123")
