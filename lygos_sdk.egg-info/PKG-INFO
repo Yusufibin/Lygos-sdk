@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: lygos-sdk
+Version: 0.1.0
+Summary: A Python SDK for the Lygos API.
+Author: Jules
+Author-email: jules@example.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Requires-Dist: requests>=2.20.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
