@@ -1,1 +1,0 @@
-lygos_sdk

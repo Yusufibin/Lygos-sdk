@@ -1,139 +1,150 @@
-# Lygos Python SDK.
+<div align="center">
 
-A Python SDK for interacting with the Lygos API.
+# Lygos Python SDK
+
+**Des appels explicites. Des erreurs lisibles. Des délais réseau configurables.**
+
+Client Python non officiel pour créer des liens de paiement Lygos et consulter leur statut.
+
+[![CI](https://github.com/Yusufibin/Lygos-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Yusufibin/Lygos-sdk/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white)](pyproject.toml)
+[![MIT](https://img.shields.io/badge/licence-MIT-3c9a82)](LICENSE)
+
+[Installation](#installation) · [Utilisation](#utilisation) · [Erreurs](#erreurs) · [Documentation officielle](https://docs.lygosapp.com)
+
+</div>
+
+## Ce que fournit le SDK
+
+- Création de liens via `POST /gateway` et lecture du statut via `GET /gateway/payin/{order_id}`.
+- Connexion HTTP réutilisée, fermeture explicite et support du gestionnaire de contexte `with`.
+- Délais de connexion et de lecture configurables, appliqués à chaque requête.
+- Exceptions spécifiques pour l’authentification, les paramètres invalides, les quotas et les pannes serveur.
+- Refus des réponses JSON invalides et des liens de paiement non HTTPS.
+- Masquage de la clé API si elle est reflétée dans un message d’erreur du fournisseur.
+- Aucun nouvel essai automatique et aucune redirection HTTP suivie par le client par défaut.
+
+Les endpoints correspondent à la documentation Lygos : [création de gateway](https://docs.lygosapp.com/api-reference/gateway/create-payment-gateway) et [statut Payin](https://docs.lygosapp.com/api-reference/payin/get-payin-status).
 
 ## Installation
 
-You can install the SDK using pip (once it's published):
+Le projet se distribue depuis les sources ; le nom d’un paquet sur PyPI n’est pas une garantie qu’il s’agit de ce dépôt.
 
 ```bash
-pip install lygos-sdk
+git clone https://github.com/Yusufibin/Lygos-sdk.git
+cd Lygos-sdk
+python -m venv .venv
+source .venv/bin/activate  # Windows : .venv\Scripts\Activate.ps1
+python -m pip install .
 ```
 
-For now, you can install it directly from the source code:
-```bash
-pip install .
-```
-Or, for development, in editable mode:
-```bash
-pip install -e .
-```
+## Utilisation
 
-## Usage
-
-First, you need to initialize the `LygosClient` with your API key.
+Placez votre clé dans la variable d’environnement `LYGOS_API_KEY` de votre application.
+Le SDK ne lit ni ne crée de fichier `.env` automatiquement.
 
 ```python
-from lygos_sdk.client import LygosClient
-from lygos_sdk.exceptions import LygosAPIError, LygosNetworkError, LygosNotFoundError
+import os
+from lygos_sdk import LygosClient
 
-# It's recommended to load the API key from environment variables
-# or a secure configuration management system.
-api_key = "your_lygos_api_key"
-client = LygosClient(api_key=api_key)
-```
-
-### Create a Payment Link
-
-You can create a payment link by calling the `create_payment_link` method.
-
-```python
-try:
-    payment_link = client.create_payment_link(
-        amount=2500, # Amount in the smallest currency unit
-        shop_name="My Awesome Shop",
-        message="Payment for Order #XYZ-123",
-        order_id="unique_order_id_xyz_123",
-        success_url="https://example.com/payment/success",
-        failure_url="https://example.com/payment/failure"
+with LygosClient(os.environ["LYGOS_API_KEY"], timeout=(5, 30)) as client:
+    link = client.create_payment_link(
+        amount=2500,
+        shop_name="Ma boutique",
+        message="Commande de démonstration",
+        order_id="commande-123",
+        success_url="https://example.com/success",
+        failure_url="https://example.com/failure",
     )
-    print(f"Payment link successfully created: {payment_link}")
-    # Redirect your user to this link to complete the payment
-except LygosAPIError as e:
-    print(f"An API error occurred: {e} (Status: {e.status_code})")
-except LygosNetworkError as e:
-    print(f"A network error occurred: {e}")
-except Exception as e:
-    print(f"An unexpected error occurred: {e}")
+    print(link)
 ```
 
-### Verifying Payments (Recommended)
+`amount` doit être un entier strictement positif ; le SDK le transmet sans conversion de devise
+ni conversion automatique d’un nombre décimal ou d’une chaîne. Les appels de l’exemple
+créent une gateway sur l’environnement configuré : ils ne sont pas exécutés par les tests.
 
-After the user is redirected back to your application from the Lygos payment page, you **must** verify the status of the transaction to confirm if the payment was successful. A user landing on your `success_url` is not a guarantee of a successful payment.
-
-The `validate_payment` method simplifies this process. It checks the status and raises an exception if the payment was not successful, making your success handler clean and secure.
+### Consulter et vérifier un statut
 
 ```python
-# In your success handler (e.g., a Flask route)
-from lygos_sdk.exceptions import LygosPaymentValidationError, LygosNotFoundError
+from lygos_sdk.exceptions import LygosPaymentValidationError
 
-order_id = "unique_order_id_xyz_123" # The order_id from your success_url
-
-try:
-    payment_details = client.validate_payment(order_id=order_id)
-    print(f"Payment for order {payment_details['order_id']} was successful!")
-    # Safely activate the user's subscription, ship the product, etc.
-
-except LygosPaymentValidationError as e:
-    # This exception is raised if the status is 'pending', 'failed', etc.
-    print(f"Payment not complete: {e}")
-    # Advise the user that the payment is not yet confirmed.
-    # You can inspect e.response_body for more details.
-
-except LygosNotFoundError:
-    print("The requested order was not found. Invalid order_id.")
-    # Handle invalid order
-
-except LygosAPIError as e:
-    print(f"An API error occurred: {e}")
-    # Handle other generic API errors
+with LygosClient(os.environ["LYGOS_API_KEY"]) as client:
+    status = client.get_payin_status("commande-123")
+    try:
+        payment = client.validate_payment("commande-123")
+    except LygosPaymentValidationError as error:
+        print(error)
 ```
 
-### Retrieving Transaction Status
+`validate_payment()` conserve la convention historique du SDK : seul le statut `paid`
+est accepté. Un identifiant de commande non vide différent de celui demandé est rejeté.
+Cette méthode ne rapproche pas les montants, les devises ou vos données de commande.
+La documentation du statut expose une chaîne libre : confirmez la convention de statut
+applicable à votre intégration avant d’automatiser une livraison ou une activation.
+Une redirection vers `success_url` seule ne vaut pas confirmation.
 
-If you need to check the status of a transaction without raising an exception for non-paid statuses, you can use the `get_payin_status` method.
+### Délais et nouvelles tentatives
+
+Le délai par défaut est `(5, 30)` secondes : connexion, puis attente de lecture.
+Ce sont les délais Requests, pas une durée totale maximale de l’opération.
+Un nombre simple (`timeout=15`) configure les deux délais.
+
+Le client ne répète pas un POST échoué : un délai dépassé peut survenir après l’acceptation
+de la requête par le fournisseur. Consultez l’état de la commande avant de décider
+manuellement d’une nouvelle tentative. Une `Session` injectée peut avoir ses propres
+politiques de retry ; sa configuration reste sous le contrôle de l’application.
+
+### Réutiliser une session
 
 ```python
-try:
-    status = client.get_payin_status(order_id="unique_order_id_xyz_123")
-    print(f"Transaction status: {status}")
-except LygosNotFoundError:
-    print("The requested order was not found.")
-except LygosAPIError as e:
-    print(f"An API error occurred: {e} (Status: {e.status_code})")
-except LygosNetworkError as e:
-    print(f"A network error occurred: {e}")
+import requests
+
+with requests.Session() as session:
+    with LygosClient(os.environ["LYGOS_API_KEY"], session=session) as client:
+        status = client.get_payin_status("commande-123")
 ```
 
-## Error Handling
+La fermeture du client ne ferme pas une session fournie par l’application.
+`base_url` peut être configurée explicitement et doit être une URL HTTPS.
 
-The SDK uses custom exceptions to make error handling more specific and intuitive. All exceptions inherit from `LygosError`.
+## Erreurs
 
-- `LygosAPIError`: The base exception for errors returned by the Lygos API.
-- `LygosAuthenticationError`: Raised for authentication issues (e.g., an invalid API key).
-- `LygosInvalidRequestError`: Raised for invalid request parameters (e.g., a missing field).
-- `LygosNotFoundError`: Raised when a requested resource (like an order) is not found.
-- `LygosServerError`: Raised for errors on the Lygos server side.
-- `LygosNetworkError`: Raised for network-related issues, such as a connection timeout.
+Toutes les exceptions du SDK héritent de `LygosError`.
 
-## Development
+| Exception | Situation |
+| --- | --- |
+| `LygosInvalidRequestError` | HTTP 400 ou 422 |
+| `LygosAuthenticationError` | HTTP 401 ou 403 |
+| `LygosNotFoundError` | HTTP 404 |
+| `LygosRateLimitError` | HTTP 429 |
+| `LygosServerError` | HTTP 5xx |
+| `LygosNetworkError` | Erreur de transport ou délai dépassé |
+| `LygosAPIError` | Réponse inattendue, JSON invalide ou autre statut HTTP |
+| `LygosPaymentValidationError` | Paiement non confirmé selon la convention `paid`, ou mauvaise commande |
 
-To contribute to this project, please follow these steps.
+Les erreurs API exposent `status_code` et `response_body` lorsque disponibles.
+Une erreur réseau ne permet pas de conclure qu’aucune opération n’a eu lieu.
 
-### Running Tests
-
-First, install the development dependencies:
+## Développement
 
 ```bash
-# Install pytest and other testing requirements
-pip install pytest requests
-
-# Install the SDK in editable mode
-pip install -e .
+uv sync --extra dev
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
+uv build
 ```
 
-Then, run the test suite using `pytest` from the root directory:
+Les 44 tests utilisent un transport simulé : aucune clé réelle, aucun paiement et aucun
+accès à l’API de production. La CI couvre Python 3.10 et 3.14 et construit le paquet.
 
-```bash
-pytest
-```
+## Migration 0.1 → 0.2
+
+Les imports `lygos_sdk.client.LygosClient` et les trois méthodes existantes restent disponibles.
+Python 3.10+ est maintenant requis. Les montants ne sont plus convertis silencieusement en entier,
+les appels ont des délais par défaut et les redirections ne sont plus suivies automatiquement.
+Les fichiers générés (`.pyc`, `.egg-info`) ont été retirés du dépôt.
+
+## Licence
+
+[MIT](LICENSE). Ce projet n’est pas un SDK officiel ni une certification d’intégration Lygos.

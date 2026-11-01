@@ -1,164 +1,186 @@
+from unittest.mock import Mock, patch
+
 import pytest
 import requests
-from unittest.mock import patch, Mock
 
-from lygos_sdk.client import LygosClient
+from lygos_sdk import LygosClient, LygosError
 from lygos_sdk.exceptions import (
     LygosAPIError,
     LygosAuthenticationError,
     LygosInvalidRequestError,
     LygosNetworkError,
     LygosNotFoundError,
-    LygosServerError,
     LygosPaymentValidationError,
+    LygosRateLimitError,
+    LygosServerError,
 )
 
+
 @pytest.fixture
-def client():
-    """Returns a LygosClient instance with a dummy API key."""
-    return LygosClient("test_api_key")
+def transport():
+    session = Mock(spec=requests.Session)
+    response = Mock(spec=requests.Response)
+    response.status_code = 200
+    response.json.return_value = {"link": "https://pay.lygosapp.com/example"}
+    session.request.return_value = response
+    return session
 
-def test_init_requires_api_key():
-    """Tests that a ValueError is raised if the API key is empty."""
-    with pytest.raises(ValueError, match="API key cannot be empty."):
-        LygosClient("")
 
-@patch('requests.post')
-def test_create_payment_link_success(mock_post, client):
-    """Tests successful creation of a payment link."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"link": "https://pay.lygosapp.com/123"}
-    mock_post.return_value = mock_response
+@pytest.fixture
+def client(transport):
+    return LygosClient("unit-test-key", session=transport)
 
-    link = client.create_payment_link(
-        amount=1000,
-        shop_name="Test Shop",
-        message="Test payment",
-        order_id="test_order_123"
+
+def create(client, **overrides):
+    args = dict(amount=2500, shop_name="Test shop", message="Test", order_id="order-1")
+    return client.create_payment_link(**(args | overrides))
+
+
+def test_payment_payload_timeouts_and_redirect_policy(client, transport):
+    assert create(client, meta_data={}) == "https://pay.lygosapp.com/example"
+    transport.request.assert_called_once_with(
+        "POST",
+        client.BASE_API_URL + "/gateway",
+        headers=client.headers,
+        timeout=(5.0, 30.0),
+        allow_redirects=False,
+        json={
+            "amount": 2500,
+            "shop_name": "Test shop",
+            "message": "Test",
+            "order_id": "order-1",
+            "meta_data": {},
+        },
     )
-
-    assert link == "https://pay.lygosapp.com/123"
-    mock_post.assert_called_once()
-    called_args, called_kwargs = mock_post.call_args
-    assert called_kwargs['json']['amount'] == 1000
-
-@patch('requests.post')
-def test_create_payment_link_missing_link(mock_post, client):
-    """Tests that a LygosAPIError is raised if the 'link' is not in the response."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"message": "Something went wrong"}
-    mock_post.return_value = mock_response
-
-    with pytest.raises(LygosAPIError, match="Payment link not found in response."):
-        client.create_payment_link(
-            amount=1000,
-            shop_name="Test Shop",
-            message="Test payment",
-            order_id="test_order_123"
-        )
-
-@patch('requests.post')
-def test_create_payment_link_http_errors(mock_post, client):
-    """Tests that the correct exception is raised for various HTTP errors."""
-    # 400 Bad Request
-    mock_response_400 = Mock()
-    mock_response_400.status_code = 400
-    mock_response_400.json.return_value = {"message": "Bad request"}
-    mock_response_400.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response_400)
-    mock_post.return_value = mock_response_400
-    with pytest.raises(LygosInvalidRequestError):
-        client.create_payment_link(1, "", "", "")
-
-    # 401 Unauthorized
-    mock_response_401 = Mock()
-    mock_response_401.status_code = 401
-    mock_response_401.json.return_value = {"message": "Unauthorized"}
-    mock_response_401.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response_401)
-    mock_post.return_value = mock_response_401
-    with pytest.raises(LygosAuthenticationError):
-        client.create_payment_link(1, "", "", "")
-
-    # 500 Internal Server Error
-    mock_response_500 = Mock()
-    mock_response_500.status_code = 500
-    mock_response_500.json.return_value = {"message": "Server error"}
-    mock_response_500.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response_500)
-    mock_post.return_value = mock_response_500
-    with pytest.raises(LygosServerError):
-        client.create_payment_link(1, "", "", "")
-
-@patch('requests.post')
-def test_create_payment_link_network_error(mock_post, client):
-    """Tests that LygosNetworkError is raised for network errors."""
-    mock_post.side_effect = requests.exceptions.ConnectionError
-    with pytest.raises(LygosNetworkError):
-        client.create_payment_link(1, "", "", "")
-
-@patch('requests.get')
-def test_get_payin_status_success(mock_get, client):
-    """Tests successful retrieval of a payin status."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"status": "paid"}
-    mock_get.return_value = mock_response
-
-    status = client.get_payin_status("order_123")
-    assert status == {"status": "paid"}
-    mock_get.assert_called_once_with(
-        "https://api.lygosapp.com/v1/gateway/payin/order_123",
-        headers=client.headers
-    )
-
-@patch('requests.get')
-def test_get_payin_status_not_found(mock_get, client):
-    """Tests that LygosNotFoundError is raised for a 404 status code."""
-    mock_response = Mock()
-    mock_response.status_code = 404
-    mock_response.json.return_value = {"message": "Not found"}
-    mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response)
-    mock_get.return_value = mock_response
-
-    with pytest.raises(LygosNotFoundError):
-        client.get_payin_status("unknown_order")
+    transport.request.return_value.close.assert_called_once()
 
 
-@patch('lygos_sdk.client.LygosClient.get_payin_status')
-def test_validate_payment_success(mock_get_status, client):
-    """Tests that validate_payment returns data when status is 'paid'."""
-    mock_get_status.return_value = {"status": "paid", "order_id": "order_123"}
-
-    result = client.validate_payment("order_123")
-
-    assert result == {"status": "paid", "order_id": "order_123"}
-    mock_get_status.assert_called_once_with("order_123")
+def test_status_encodes_order_as_one_path_segment(client, transport):
+    transport.request.return_value.json.return_value = {"status": "paid"}
+    assert client.get_payin_status("order/one ?") == {"status": "paid"}
+    assert transport.request.call_args.args[1].endswith("/order%2Fone%20%3F")
 
 
-@patch('lygos_sdk.client.LygosClient.get_payin_status')
-def test_validate_payment_failed_status(mock_get_status, client):
-    """Tests that validate_payment raises an exception for 'failed' status."""
-    mock_get_status.return_value = {"status": "failed", "order_id": "order_123"}
+@pytest.mark.parametrize(
+    "status,error",
+    [
+        (400, LygosInvalidRequestError),
+        (401, LygosAuthenticationError),
+        (403, LygosAuthenticationError),
+        (404, LygosNotFoundError),
+        (422, LygosInvalidRequestError),
+        (429, LygosRateLimitError),
+        (500, LygosServerError),
+        (302, LygosAPIError),
+    ],
+)
+def test_http_errors_use_typed_exceptions_and_close_response(client, transport, status, error):
+    response = transport.request.return_value
+    response.status_code = status
+    response.json.return_value = {"detail": {"message": "Provider response"}}
+    with pytest.raises(error) as caught:
+        create(client)
+    assert caught.value.status_code == status
+    assert "Provider response" in str(caught.value)
+    response.close.assert_called_once()
 
-    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'failed'."):
-        client.validate_payment("order_123")
 
-    mock_get_status.assert_called_once_with("order_123")
-
-
-@patch('lygos_sdk.client.LygosClient.get_payin_status')
-def test_validate_payment_pending_status(mock_get_status, client):
-    """Tests that validate_payment raises an exception for 'pending' status."""
-    mock_get_status.return_value = {"status": "pending", "order_id": "order_123"}
-
-    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'pending'."):
-        client.validate_payment("order_123")
+@pytest.mark.parametrize("value", [[], None, "not-an-object", 100])
+def test_malformed_success_json_is_a_sdk_error(client, transport, value):
+    transport.request.return_value.json.return_value = value
+    with pytest.raises(LygosAPIError, match="instead of an object"):
+        client.get_payin_status("order")
 
 
-@patch('lygos_sdk.client.LygosClient.get_payin_status')
-def test_validate_payment_missing_status(mock_get_status, client):
-    """Tests that validate_payment raises an exception if 'status' key is missing."""
-    mock_get_status.return_value = {"order_id": "order_123"}  # No status key
+def test_invalid_json_on_success_and_non_json_errors(client, transport):
+    response = transport.request.return_value
+    response.json.side_effect = ValueError("bad json")
+    with pytest.raises(LygosAPIError, match="invalid JSON"):
+        create(client)
+    response.status_code = 503
+    with pytest.raises(LygosServerError, match="HTTP 503"):
+        create(client)
 
-    with pytest.raises(LygosPaymentValidationError, match="Payment validation failed. Status is 'None'."):
-        client.validate_payment("order_123")
+
+def test_timeout_never_retries_or_exposes_credentials(client, transport):
+    transport.request.side_effect = requests.Timeout("unit-test-key")
+    with pytest.raises(LygosNetworkError) as caught:
+        create(client)
+    assert "unit-test-key" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    transport.request.assert_called_once()
+
+
+def test_reflected_api_keys_are_redacted_from_errors(client, transport):
+    response = transport.request.return_value
+    response.status_code = 401
+    response.json.return_value = {"message": "invalid unit-test-key", "nested": ["unit-test-key"]}
+    with pytest.raises(LygosAuthenticationError) as caught:
+        create(client)
+    assert "unit-test-key" not in str(caught.value)
+    assert "unit-test-key" not in str(caught.value.response_body)
+
+
+@pytest.mark.parametrize("amount", [0, -1, True, 1.2, "2500"])
+def test_amounts_are_not_silently_coerced(client, transport, amount):
+    with pytest.raises(ValueError, match="positive integer"):
+        create(client, amount=amount)
+    transport.request.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["", " ", None, "x\r\ny"])
+def test_api_key_validation(key):
+    with pytest.raises(ValueError):
+        LygosClient(key)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, False, float("inf"), (1, 0), (1,), None])
+def test_timeout_validation(timeout):
+    with pytest.raises(ValueError):
+        LygosClient("test", timeout=timeout)
+
+
+def test_custom_timeout_and_base_url(transport):
+    client = LygosClient("test", timeout=12, base_url="https://example.test/v1/", session=transport)
+    client.get_payin_status("id")
+    assert transport.request.call_args.kwargs["timeout"] == 12
+    assert transport.request.call_args.args[1] == "https://example.test/v1/gateway/payin/id"
+    with pytest.raises(ValueError):
+        LygosClient("test", base_url="http://example.test")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"status": "pending"}, {"status": "failed"}, {}, {"status": "paid", "order_id": "different"}],
+)
+def test_payment_validation_rejects_unconfirmed_or_mismatched_orders(client, transport, payload):
+    transport.request.return_value.json.return_value = payload
+    with pytest.raises(LygosPaymentValidationError):
+        client.validate_payment("order-1")
+
+
+def test_payment_validation_accepts_paid_same_order(client, transport):
+    payload = {"status": "paid", "order_id": "order-1"}
+    transport.request.return_value.json.return_value = payload
+    assert client.validate_payment("order-1") == payload
+
+
+@pytest.mark.parametrize(
+    "link", [None, 0, "javascript:alert(1)", "https://user:password@example.test"]
+)
+def test_invalid_payment_links_are_rejected(client, transport, link):
+    transport.request.return_value.json.return_value = {"link": link}
+    with pytest.raises(LygosAPIError):
+        create(client)
+
+
+def test_client_lifecycle_preserves_external_session(transport):
+    with LygosClient("test", session=transport) as client:
+        client.get_payin_status("order")
+    transport.close.assert_not_called()
+    with pytest.raises(LygosError, match="closed"):
+        client.get_payin_status("order")
+    with patch("requests.Session", return_value=transport):
+        with LygosClient("test"):
+            pass
+    transport.close.assert_called_once()

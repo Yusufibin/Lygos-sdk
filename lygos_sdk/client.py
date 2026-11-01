@@ -1,57 +1,154 @@
+"""Synchronous Lygos client with bounded requests and explicit error handling."""
+
+import math
+from typing import Dict, Optional
+from urllib.parse import quote, urlparse
+
 import requests
-from typing import Optional, Dict
 
 from .exceptions import (
     LygosAPIError,
     LygosAuthenticationError,
+    LygosError,
     LygosInvalidRequestError,
     LygosNetworkError,
     LygosNotFoundError,
-    LygosServerError,
     LygosPaymentValidationError,
+    LygosRateLimitError,
+    LygosServerError,
 )
 
+
 class LygosClient:
-    """
-    A client for interacting with the Lygos API.
-    """
     BASE_API_URL = "https://api.lygosapp.com/v1"
 
-    def __init__(self, api_key: str):
-        """
-        Initializes the LygosClient.
-
-        :param api_key: Your Lygos API key.
-        """
-        if not api_key:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        timeout=(5.0, 30.0),
+        base_url: str = BASE_API_URL,
+        session: Optional[requests.Session] = None,
+    ):
+        if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("API key cannot be empty.")
-
+        if any(c in api_key for c in "\r\n"):
+            raise ValueError("API key must not contain newlines.")
+        values = timeout if isinstance(timeout, tuple) else (timeout,)
+        if len(values) not in (1, 2) or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+            for v in values
+        ):
+            raise ValueError("timeout must be positive seconds or a (connect, read) pair.")
+        if isinstance(timeout, tuple) and len(timeout) != 2:
+            raise ValueError("timeout tuple must contain connect and read seconds.")
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "base_url must be an HTTPS API URL without credentials, query or fragment."
+            )
         self.api_key = api_key
+        self.timeout = timeout
+        self.base_url = base_url.rstrip("/")
         self.headers = {
-            "api-key": self.api_key,
+            "api-key": api_key,
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
+        self._session = session if session is not None else requests.Session()
+        self._owns_session = session is None
+        self._closed = False
 
-    def _handle_api_error(self, response: requests.Response):
-        """Helper function to handle API errors."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        if not self._closed and self._owns_session:
+            self._session.close()
+        self._closed = True
+
+    def _redact(self, value):
+        if isinstance(value, str):
+            return value.replace(self.api_key, "[redacted]")
+        if isinstance(value, dict):
+            return {self._redact(k): self._redact(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact(v) for v in value]
+        return value
+
+    def _handle_api_error(self, response):
         try:
-            error_data = response.json()
-            message = error_data.get("message", "An unknown API error occurred.")
-        except requests.exceptions.JSONDecodeError:
-            message = response.text
-            error_data = None
+            body = self._redact(response.json())
+        except ValueError:
+            body = None
+        message = None
+        if isinstance(body, dict):
+            message = body.get("message")
+            detail = body.get("detail")
+            if not isinstance(message, str) and isinstance(detail, dict):
+                message = detail.get("message")
+            elif not isinstance(message, str) and isinstance(detail, str):
+                message = detail
+        if not isinstance(message, str) or not message:
+            message = f"Lygos returned HTTP {response.status_code}."
+        status = response.status_code
+        error = {
+            400: LygosInvalidRequestError,
+            401: LygosAuthenticationError,
+            403: LygosAuthenticationError,
+            404: LygosNotFoundError,
+            422: LygosInvalidRequestError,
+            429: LygosRateLimitError,
+        }.get(status, LygosServerError if status >= 500 else LygosAPIError)
+        raise error(message[:1000], status, body)
 
-        status_code = response.status_code
-        if status_code == 400:
-            raise LygosInvalidRequestError(message, status_code, error_data)
-        if status_code == 401:
-            raise LygosAuthenticationError(message, status_code, error_data)
-        if status_code == 404:
-            raise LygosNotFoundError(message, status_code, error_data)
-        if status_code >= 500:
-            raise LygosServerError(message, status_code, error_data)
+    def _request(self, method: str, path: str, **kwargs) -> Dict:
+        if self._closed:
+            raise LygosError("This client is closed. Create a new LygosClient.")
+        try:
+            response = self._session.request(
+                method,
+                self.base_url + path,
+                headers=self.headers,
+                timeout=self.timeout,
+                allow_redirects=False,
+                **kwargs,
+            )
+        except requests.RequestException:
+            # A timed-out POST may already have been accepted. Never retry it implicitly.
+            raise LygosNetworkError(
+                "Lygos request failed or timed out. Check the order status before retrying a payment request."
+            ) from None
+        try:
+            if not 200 <= response.status_code < 300:
+                self._handle_api_error(response)
+            try:
+                body = response.json()
+            except ValueError:
+                raise LygosAPIError("Lygos returned invalid JSON.", response.status_code) from None
+            if not isinstance(body, dict):
+                raise LygosAPIError(
+                    "Lygos returned a JSON value instead of an object.", response.status_code
+                )
+            return body
+        finally:
+            response.close()
 
-        raise LygosAPIError(message, status_code, error_data)
+    @staticmethod
+    def _order_id(value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("order_id must be a non-empty string.")
+        return value
 
     def create_payment_link(
         self,
@@ -61,93 +158,56 @@ class LygosClient:
         order_id: str,
         meta_data: Optional[Dict] = None,
         success_url: Optional[str] = None,
-        failure_url: Optional[str] = None
+        failure_url: Optional[str] = None,
     ) -> str:
-        """
-        Creates a payment gateway link.
-
-        :param amount: The amount to be paid.
-        :param shop_name: The name of the shop.
-        :param message: A message to be displayed to the user.
-        :param order_id: A unique identifier for the order.
-        :param meta_data: Optional metadata for the transaction.
-        :param success_url: The URL to redirect to on successful payment.
-        :param failure_url: The URL to redirect to on failed payment.
-        :return: The payment link URL.
-        """
-        create_gateway_url = f"{self.BASE_API_URL}/gateway"
+        """Create a gateway once. Amount is sent as an integer without currency conversion."""
+        if type(amount) is not int or amount <= 0:
+            raise ValueError("amount must be a positive integer.")
+        if not isinstance(shop_name, str) or not shop_name.strip():
+            raise ValueError("shop_name must be a non-empty string.")
         payload = {
-            "amount": int(amount),
+            "amount": amount,
             "shop_name": shop_name,
             "message": message,
-            "order_id": order_id,
+            "order_id": self._order_id(order_id),
         }
-        if meta_data:
-            payload["meta_data"] = meta_data
-        if success_url:
-            payload["success_url"] = success_url
-        if failure_url:
-            payload["failure_url"] = failure_url
-
-        try:
-            response = requests.post(create_gateway_url, headers=self.headers, json=payload)
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            self._handle_api_error(e.response)
-        except requests.exceptions.RequestException as e:
-            raise LygosNetworkError(f"Network error while creating payment link: {e}") from e
-
-        response_data = response.json()
-        payment_link = response_data.get("link")
-
-        if not payment_link:
+        for name, value in (
+            ("meta_data", meta_data),
+            ("success_url", success_url),
+            ("failure_url", failure_url),
+        ):
+            if value is not None:
+                payload[name] = value
+        data = self._request("POST", "/gateway", json=payload)
+        link = data.get("link")
+        if not isinstance(link, str) or not link:
             raise LygosAPIError("Payment link not found in response.")
-
-        return payment_link
+        parsed = urlparse(link)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or any(c in link for c in "\r\n")
+        ):
+            raise LygosAPIError("Lygos returned an invalid payment link.")
+        return link
 
     def get_payin_status(self, order_id: str) -> Dict:
-        """
-        Retrieves the status of a specific payin transaction.
-
-        :param order_id: The order ID of the transaction to check.
-        :return: A dictionary containing the transaction status.
-        """
-        get_payin_status_url = f"{self.BASE_API_URL}/gateway/payin/{order_id}"
-
-        try:
-            response = requests.get(get_payin_status_url, headers=self.headers)
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            self._handle_api_error(e.response)
-        except requests.exceptions.RequestException as e:
-            raise LygosNetworkError(f"Network error while getting payin status: {e}") from e
-
-        return response.json()
+        return self._request("GET", "/gateway/payin/" + quote(self._order_id(order_id), safe=""))
 
     def validate_payment(self, order_id: str) -> Dict:
-        """
-        Validates a payment by checking its status.
-
-        This is a high-level method that simplifies payment verification.
-        It fetches the transaction status and raises an exception if the
-        payment is not complete.
-
-        :param order_id: The order ID of the transaction to validate.
-        :return: A dictionary containing the transaction details if successful.
-        :raises LygosPaymentValidationError: If the payment status is not 'paid'.
-        :raises LygosNotFoundError: If the order ID is not found.
-        :raises LygosAPIError: For other API-related errors.
-        :raises LygosNetworkError: For network issues.
-        """
-        status_data = self.get_payin_status(order_id)
-
-        status = status_data.get("status")
-        if status == "paid":
-            return status_data
-
-        message = f"Payment validation failed. Status is '{status}'."
+        """Accept only the existing 'paid' status convention; this is not reconciliation."""
+        data = self.get_payin_status(order_id)
+        returned_order = data.get("order_id")
+        if returned_order and returned_order != order_id:
+            raise LygosPaymentValidationError(
+                "Payment order does not match the requested order.", 200, self._redact(data)
+            )
+        if data.get("status") == "paid":
+            return data
         raise LygosPaymentValidationError(
-            message,
-            status_code=200,  # The API call itself was successful
-            response_body=status_data
+            f"Payment validation failed. Status is '{self._redact(data.get('status'))}'.",
+            200,
+            self._redact(data),
         )
